@@ -1,0 +1,121 @@
+#!/sbin/sh
+
+OUTFD=/proc/self/fd/$2
+ZIPFILE="$3"
+
+ui_print() {
+    echo -e "ui_print $1\nui_print " >>"$OUTFD"
+}
+
+package_extract_file() {
+    unzip -p "$ZIPFILE" "$1" >"$2" 2>/dev/null
+    return $?
+}
+
+# Volume key reader
+getKey() {
+    local keyInfo=""
+    while true; do
+        keyInfo=$(getevent -qlc 1 | grep -E 'KEY_VOLUME(UP|DOWN)')
+        [ -z "$keyInfo" ] && continue
+        echo "$keyInfo" | grep -q "KEY_VOLUMEUP"   && echo "$keyInfo" | grep -q " DOWN" && { echo "UP"; return; }
+        echo "$keyInfo" | grep -q "KEY_VOLUMEDOWN" && echo "$keyInfo" | grep -q " DOWN" && { echo "DOWN"; return; }
+    done
+}
+
+# file selector
+chooseOption() {
+    local listfile=$1
+    local total index cur key
+    
+    total=$(wc -l < "$listfile" | tr -d ' ')
+    index=1
+    
+    ui_print " "
+    ui_print "Use Vol+ to scroll, Vol- to select"
+    ui_print "--------------------------------------------"
+    nl -w2 -s") " "$listfile" | sed 's/^/ /' | while read line; do ui_print "$line"; done
+    ui_print "--------------------------------------------"
+    
+    while true; do
+        cur=$(sed -n "${index}p" "$listfile")
+        ui_print "Selected: ${index}) ${cur}"
+        
+        key=$(getKey)
+        case "$key" in
+            UP)   index=$(( index % total + 1 )) ;;
+            DOWN) echo "$cur"; return ;;
+        esac
+    done
+}
+
+chooseRecovery() {
+    local listfile="/tmp/recoveries.list"
+    unzip -p "$ZIPFILE" "recoveries.list" > "$listfile" 2>/dev/null
+    if [ ! -s "$listfile" ]; then
+        ui_print "ERROR: recoveries.list missing or empty in zip"
+        exit 1
+    fi
+    RECOVERY_IMG=$(chooseOption "$listfile")
+    ui_print "Chosen recovery: $RECOVERY_IMG"
+}
+
+bin=/tmp/bin/android
+rm -rf "$bin"
+mkdir -p "$bin"
+unzip -o "$ZIPFILE" bin/android/* -d /tmp >/dev/null 2>&1
+chmod -R 755 "$bin"
+
+ui_print "                                          "
+ui_print "=========================================="
+ui_print "            Flashable Recovery            "
+ui_print "=========================================="
+ui_print "                                          "
+
+device=$(getprop ro.product.device)
+device_value="peridot"
+device_value_in="peridot_in"
+
+ui_print "Checking Device information"
+ui_print " "
+ui_print "Detected Device: $device"
+ui_print " "
+
+if [ "$device" != "$device_value" ] && [ "$device" != "$device_value_in" ]; then
+    ui_print "ERROR: Unsupported device ($device)"
+    ui_print "This package is only for: $device_value / $device_value_in"
+    exit 1
+fi
+
+ui_print "Choose a recovery to flash:"
+chooseRecovery
+
+ui_print " "
+ui_print "Flashing $RECOVERY_IMG to both recovery slots..."
+ui_print " "
+
+if ! package_extract_file "$RECOVERY_IMG" "/dev/block/bootdevice/by-name/recovery_a"; then
+    ui_print "ERROR: Failed to flash recovery_a"
+    exit 1
+fi
+
+if ! package_extract_file "$RECOVERY_IMG" "/dev/block/bootdevice/by-name/recovery_b"; then
+    ui_print "ERROR: Failed to flash recovery_b"
+    exit 1
+fi
+
+ui_print " "
+ui_print "Recovery flashed successfully on both slots!"
+ui_print " "
+
+ui_print "Reboot to recovery? (Vol+ = Yes, Vol- = No)"
+key=$(getKey)
+if [ "$key" = "UP" ]; then
+    ui_print "Rebooting to recovery..."
+    reboot recovery
+else
+    ui_print "Reboot skipped. You can manually reboot to recovery."
+fi
+ui_print " "
+
+exit 0
